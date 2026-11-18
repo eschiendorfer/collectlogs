@@ -23,6 +23,7 @@ use Context;
 use Db;
 use DbQuery;
 use PrestaShopException;
+use Thirtybees\Core\Error\ErrorDescription;
 use Thirtybees\Core\Error\ErrorUtils;
 use Throwable;
 
@@ -52,6 +53,21 @@ class Logger
         $this->transformMessage = $transformMessage;
     }
 
+    public function logExceptionToDatabase(ErrorDescription $error, array $extra): void
+    {
+        $extra[] = [
+            'label' => 'Stacktrace',
+            'content' => $error->getTraceAsString(),
+        ];
+        $this->log('error', $error->getErrorName() . ': ' . $error->getMessage(), [
+            'type' => 'Exception',
+            'errfile' => ErrorUtils::getRelativeFile($error->getSourceFile()),
+            'errline' => $error->getSourceLine(),
+            'extra' => $extra,
+            'database_only' => true,
+        ]);
+    }
+
     /**
      * Log message
      *
@@ -70,6 +86,7 @@ class Logger
             $extra = $context['extra'] ?? [];
             $realFile = $context['realFile'] ?? '';
             $realLine = (int)($context['realLine'] ?? 0);
+            $databaseOnly = $context['database_only'] ?? false;
 
             $hasRealFile = $realFile && $realLine;
             $genericMessage = $this->transformMessage->transform($message);
@@ -83,73 +100,85 @@ class Logger
             if ($errorId) {
                 $this->markErrorSeen($errorId);
             } else {
-                if (! $this->hasStackTrace($extra)) {
-                    $extra[] = [
-                        'label' => 'Stacktrace',
-                        'content' => $this->getStackTrace(),
-                    ];
-                }
-                if (strtolower((string)php_sapi_name()) === 'cli') {
-                    $params = "";
-                    global $argv;
-                    if (isset($argv)) {
-                        $params = implode(" ", $argv);
-                    }
-                    $extra[] = [
-                        'label' => 'CLI Request',
-                        'content' => $params
-                    ];
-                } else {
-                    $extra[] = [
-                        'label' => 'HTTP Request',
-                        'content' => $this->getServerParameter('REQUEST_METHOD') . " " . $this->getServerParameter('REQUEST_URI') . "\n"
-                    ];
-                    $referer = $this->getServerParameter('HTTP_REFERER');
-                    if ($referer) {
+                if (!$databaseOnly) {
+                    if (! $this->hasStackTrace($extra)) {
                         $extra[] = [
-                            'label' => 'Referrer',
-                            'content' => $referer
+                            'label' => 'Stacktrace',
+                            'content' => $this->getStackTrace(),
                         ];
                     }
+                    $extra = array_merge($extra, $this->getRequestSections());
                 }
-
-                if ($_GET) {
-                    $params = "";
-                    foreach ($_GET as $param => $value) {
-                        $params .= "  [$param]: " . ErrorUtils::displayArgument($value) . "\n";
-                    }
-                    $extra[] = [
-                        'label' => 'GET parameters',
-                        'content' => $params
-                    ];
-                }
-                if ($_POST) {
-                    $params = "";
-                    foreach ($_POST as $param => $value) {
-                        $params .= "  [$param]: " . ErrorUtils::displayArgument($value) . "\n";
-                    }
-                    $extra[] = [
-                        'label' => 'POST parameters',
-                        'content' => $params
-                    ];
-                }
-                $cookie = Context::getContext()->cookie;
-                $params = "";
-                foreach ($cookie->getAll() as $param => $value) {
-                    $params .= "  [$param]: " . ErrorUtils::displayArgument($value) . "\n";
-                }
-                $extra[] = [
-                    'label' => 'Cookie',
-                    'content' => $params
-                ];
 
                 $this->insertErrorToDb($uid, $type, $file, $line, $realFile, $realLine, $genericMessage, $message, $extra);
             }
 
-            $this->logMessageToFile($errorId === 0, $uid, $type, $message, $file, $line, $hasRealFile, $realFile, $realLine, $extra);
+            if (!$databaseOnly) {
+                $this->logMessageToFile($errorId === 0, $uid, $type, $message, $file, $line, $hasRealFile, $realFile, $realLine, $extra);
+            }
         } catch (Throwable $t) {
             trigger_error("collectlogs: failed to log error: " . $t->getMessage(), E_USER_WARNING);
         }
+    }
+
+    private function getRequestSections(): array
+    {
+        $extra = [];
+        if (strtolower((string)php_sapi_name()) === 'cli') {
+            $params = "";
+            global $argv;
+            if (isset($argv)) {
+                $params = implode(" ", $argv);
+            }
+            $extra[] = [
+                'label' => 'CLI Request',
+                'content' => $params
+            ];
+        } else {
+            $extra[] = [
+                'label' => 'HTTP Request',
+                'content' => $this->getServerParameter('REQUEST_METHOD') . " " . $this->getServerParameter('REQUEST_URI') . "\n"
+            ];
+            $referer = $this->getServerParameter('HTTP_REFERER');
+            if ($referer) {
+                $extra[] = [
+                    'label' => 'Referrer',
+                    'content' => $referer
+                ];
+            }
+        }
+
+        if ($_GET) {
+            $params = "";
+            foreach ($_GET as $param => $value) {
+                $params .= "  [$param]: " . ErrorUtils::displayArgument($value) . "\n";
+            }
+            $extra[] = [
+                'label' => 'GET parameters',
+                'content' => $params
+            ];
+        }
+        if ($_POST) {
+            $params = "";
+            foreach ($_POST as $param => $value) {
+                $params .= "  [$param]: " . ErrorUtils::displayArgument($value) . "\n";
+            }
+            $extra[] = [
+                'label' => 'POST parameters',
+                'content' => $params
+            ];
+        }
+        $cookie = Context::getContext()->cookie;
+        $params = "";
+        foreach ($cookie->getAll() as $param => $value) {
+            $params .= "  [$param]: " . ErrorUtils::displayArgument($value) . "\n";
+        }
+        $extra[] = [
+            'label' => 'Cookie',
+            'content' => $params
+        ];
+
+        return $extra;
     }
 
     /**

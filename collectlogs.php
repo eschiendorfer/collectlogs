@@ -24,6 +24,7 @@ use CollectLogsModule\Severity;
 use CollectLogsModule\TransformMessage;
 use CollectLogsModule\TransformMessageImpl;
 use Thirtybees\Core\DependencyInjection\ServiceLocator;
+use Thirtybees\Core\Error\ErrorDescription;
 use Thirtybees\Core\Error\ErrorUtils;
 
 require_once __DIR__ . '/classes/Settings.php';
@@ -260,7 +261,7 @@ class CollectLogs extends Module
      * Hook handler that allows custom code to report already caught exceptions.
      *
      * Expected parameters:
-     * - exception: Throwable
+     * - exception: Throwable, or a prepared ErrorDescription to store directly in CollectLogs
      * - extra_content: string|array (optional)
      *
      * @param array $params
@@ -273,7 +274,7 @@ class CollectLogs extends Module
             return;
         }
         $exception = $params['exception'] ?? null;
-        if (!($exception instanceof Throwable)) {
+        if (!($exception instanceof Throwable) && !($exception instanceof ErrorDescription)) {
             return;
         }
         $this->reportCaughtException($exception, $params['extra_content'] ?? null);
@@ -282,27 +283,32 @@ class CollectLogs extends Module
     /**
      * Reports an exception that was already handled by application code.
      *
-     * The exception is converted through ErrorUtils::describeException() and
-     * logged through ErrorHandler::logFatalError(), so the same collectlogs
-     * pipeline is used as for uncaught exceptions.
+     * Prepared descriptions are stored only in the CollectLogs database, with the supplied diagnostics.
      *
-     * @param Throwable $exception
+     * @param Throwable|ErrorDescription $exception
      * @param mixed $extraContent
      *
      * @return void
      */
-    protected function reportCaughtException(Throwable $exception, $extraContent = null)
+    protected function reportCaughtException($exception, $extraContent = null)
     {
         if (!$this->systemSupportsLogger()) {
             return;
         }
         try {
-            $errorDescription = ErrorUtils::describeException($exception);
+            $prepared = $exception instanceof ErrorDescription;
+            $errorDescription = $prepared ? $exception : ErrorUtils::describeException($exception);
             $extra = $errorDescription->getExtraSections();
             $extra[] = [
                 'label' => 'Caught exception',
                 'content' => $this->buildCaughtExceptionSection($extraContent),
             ];
+            if ($prepared) {
+                require_once __DIR__ . '/classes/Logger.php';
+                $logger = new Logger($this->getSettings(), $this->getTransformMessage());
+                $logger->logExceptionToDatabase($errorDescription, $extra);
+                return;
+            }
             $errorDescription->setExtraSections($extra);
             ServiceLocator::getInstance()->getErrorHandler()->logFatalError($errorDescription);
         } catch (Throwable $ignored) {
